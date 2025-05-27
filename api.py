@@ -1,9 +1,18 @@
 from fastapi import FastAPI, Query
 from fastapi.responses import JSONResponse
 from playwright.sync_api import sync_playwright
-import re
+import math
 
 app = FastAPI()
+
+def format_file_size(size_bytes):
+    if not size_bytes:
+        return "Unknown"
+    size_name = ("B", "KB", "MB", "GB", "TB")
+    i = int(math.floor(math.log(size_bytes, 1024)))
+    p = math.pow(1024, i)
+    s = round(size_bytes / p, 2)
+    return f"{s} {size_name[i]}"
 
 @app.get("/")
 def root():
@@ -19,38 +28,36 @@ def extract(url: str = Query(..., description="Terabox share link")):
             browser = p.chromium.launch(headless=True)
             context = browser.new_context()
             page = context.new_page()
-            page.goto(url, timeout=60000)
-            page.wait_for_timeout(5000)
 
-            # Extract file name
-            name = page.query_selector(".file-name") or page.query_selector(".filename")
-            file_name = name.inner_text().strip() if name else "Unknown"
+            page.goto(url, timeout=90000)
+            page.wait_for_timeout(7000)
 
-            # Extract file size
-            size_elem = page.query_selector(".file-size") or page.query_selector(".size")
-            file_size = size_elem.inner_text().strip() if size_elem else "Unknown"
+            file_name = page.eval_on_selector(".file-name, .filename", "el => el.innerText") or "Unknown"
+            file_size_raw = page.eval_on_selector(".file-size, .size", "el => el.innerText") or "Unknown"
+            file_size_bytes = page.eval_on_selector("meta[itemprop='contentSize']", "el => el.getAttribute('content')") or None
 
-            # Extract preview/watch URL and download link
-            surl_match = re.search(r"surl=([a-zA-Z0-9_-]+)", url)
-            surl = surl_match.group(1) if surl_match else None
+            size_human = format_file_size(int(file_size_bytes)) if file_size_bytes and file_size_bytes.isdigit() else file_size_raw
 
-            preview_url = f"https://www.terabox.com/sharing/link?surl={surl}"
-            watch_url = f"https://www.terabox.com/streaming/link?surl={surl}"
-            download_page = f"https://www.terabox.com/share/init?surl={surl}"
+            # Extract real preview link if possible
+            stream_button = page.query_selector("a[href*='/streaming/link?']")
+            watch_url = stream_button.get_attribute("href") if stream_button else url
+
+            # Extract real download link
+            download_button = page.query_selector("a[href*='/download?']")
+            download_link = download_button.get_attribute("href") if download_button else url
 
             browser.close()
 
             return {
                 "status": True,
                 "message": "Real metadata extracted successfully",
-                "preview_url": preview_url,
-                "watch_url": watch_url,
-                "download_page": download_page,
                 "file_info": {
                     "name": file_name,
-                    "size": file_size,
-                    "type": "Video or Unknown"
-                }
+                    "size": size_human,
+                    "type": "Video or File"
+                },
+                "watch_url": watch_url,
+                "download_url": download_link
             }
 
     except Exception as e:
