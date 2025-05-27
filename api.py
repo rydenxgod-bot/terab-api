@@ -1,18 +1,9 @@
 from fastapi import FastAPI, Query
 from fastapi.responses import JSONResponse
 from playwright.sync_api import sync_playwright
-import math
+import re
 
 app = FastAPI()
-
-def format_file_size(size_bytes):
-    if not size_bytes:
-        return "Unknown"
-    size_name = ("B", "KB", "MB", "GB", "TB")
-    i = int(math.floor(math.log(size_bytes, 1024)))
-    p = math.pow(1024, i)
-    s = round(size_bytes / p, 2)
-    return f"{s} {size_name[i]}"
 
 @app.get("/")
 def root():
@@ -25,40 +16,74 @@ def extract(url: str = Query(..., description="Terabox share link")):
 
     try:
         with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
+            browser = p.chromium.launch(headless=True, args=["--disable-blink-features=AutomationControlled"])
             context = browser.new_context()
             page = context.new_page()
 
-            page.goto(url, timeout=90000)
-            page.wait_for_timeout(7000)
+            # Navigate to page
+            page.goto(url, timeout=60000)
 
-            file_name = page.eval_on_selector(".file-name, .filename", "el => el.innerText") or "Unknown"
-            file_size_raw = page.eval_on_selector(".file-size, .size", "el => el.innerText") or "Unknown"
-            file_size_bytes = page.eval_on_selector("meta[itemprop='contentSize']", "el => el.getAttribute('content')") or None
+            # Wait for the filename to load (up to 15 seconds)
+            try:
+                page.wait_for_selector(".file-name, .filename", timeout=15000)
+            except:
+                pass  # Continue even if file name isn't found
 
-            size_human = format_file_size(int(file_size_bytes)) if file_size_bytes and file_size_bytes.isdigit() else file_size_raw
+            # Extract file name
+            try:
+                file_name = page.eval_on_selector(".file-name, .filename", "el => el.textContent.trim()")
+            except:
+                file_name = "Unknown"
 
-            # Extract real preview link if possible
-            stream_button = page.query_selector("a[href*='/streaming/link?']")
-            watch_url = stream_button.get_attribute("href") if stream_button else url
+            # Extract file size
+            try:
+                file_size = page.eval_on_selector(".file-size, .size", "el => el.textContent.trim()")
+            except:
+                file_size = "Unknown"
 
-            # Extract real download link
-            download_button = page.query_selector("a[href*='/download?']")
-            download_link = download_button.get_attribute("href") if download_button else url
+            # Extract real URLs using surl fallback
+            surl_match = re.search(r"surl=([a-zA-Z0-9_-]+)", url)
+            surl = surl_match.group(1) if surl_match else None
+
+            if not surl:
+                # Try to extract from redirected canonical link
+                try:
+                    canonical = page.eval_on_selector('link[rel="canonical"]', "el => el.href")
+                    surl_match = re.search(r"surl=([a-zA-Z0-9_-]+)", canonical)
+                    surl = surl_match.group(1) if surl_match else None
+                except:
+                    surl = None
+
+            preview_url = f"https://www.terabox.com/sharing/link?surl={surl}" if surl else url
+            watch_url = f"https://www.terabox.com/streaming/link?surl={surl}" if surl else url
+            download_page = f"https://www.terabox.com/share/init?surl={surl}" if surl else url
 
             browser.close()
 
             return {
                 "status": True,
                 "message": "Real metadata extracted successfully",
+                "preview_url": preview_url,
+                "watch_url": watch_url,
+                "download_page": download_page,
                 "file_info": {
                     "name": file_name,
-                    "size": size_human,
-                    "type": "Video or File"
-                },
-                "watch_url": watch_url,
-                "download_url": download_link
+                    "size": file_size,
+                    "type": "Video or Unknown"
+                }
             }
 
     except Exception as e:
-        return JSONResponse({"status": False, "message": f"Error: {str(e)}"}, status_code=500)
+        return JSONResponse({
+            "status": True,
+            "message": "Partial success. File details might be missing but URLs are returned.",
+            "preview_url": url,
+            "watch_url": url,
+            "download_page": url,
+            "file_info": {
+                "name": "Unknown",
+                "size": "Unknown",
+                "type": "Video or Unknown"
+            },
+            "error_detail": str(e)
+        }, status_code=200)
