@@ -1,6 +1,5 @@
 FROM python:3.11-slim
 
-# Install system packages for Playwright
 RUN apt-get update && apt-get install -y \
     curl \
     libnss3 \
@@ -19,21 +18,15 @@ RUN apt-get update && apt-get install -y \
     fonts-liberation \
     && rm -rf /var/lib/apt/lists/*
 
-# Set working directory
 WORKDIR /app
 
-# Copy and install Python dependencies
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Install Playwright browser binaries
-RUN python -m playwright install
+RUN python -m playwright install --with-deps
 
-# Copy the app
 COPY api.py .
 
-# Expose port
 EXPOSE 8000
 
-# Run the API
 CMD ["uvicorn", "api:app", "--host", "0.0.0.0", "--port", "8000"]
